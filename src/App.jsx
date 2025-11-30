@@ -151,12 +151,14 @@ const normalizeCard = (card, index = 0) => {
     iconBg: theme.iconBg,
     icon: theme.icon,
     balance: formatCentsToYuan(card.balanceCents || 0),
+    totalSavingsCents: card.totalSavingsCents || 0,
+    activeSavings: card.activeSavings || [],
     transactions: (card.transactions || []).map((t) => ({
       id: t.id,
-      title: t.note || t.category || (t.type === 'income' ? '收入' : '支出'),
-      amount: Math.abs(t.amount_cents || t.amountCents || 0) / 100,
+      title: t.note || t.category || (t.type === 'income' ? '收入' : t.type === 'savings_deposit' ? '转入储蓄' : t.type === 'savings_withdraw' ? '储蓄取回' : t.type === 'savings_penalty' ? '违约金' : '支出'),
+      amount: (t.amount_cents || t.amountCents || 0) / 100,
       rawAmount: t.amount_cents || t.amountCents || 0,
-      type: t.type === 'expense' || (t.amount_cents || t.amountCents || 0) < 0 ? 'expense' : 'income',
+      type: t.type,
       date: t.created_at || t.createdAt || new Date().toISOString(),
       category: t.category,
     })),
@@ -199,6 +201,10 @@ const AdminPanel = () => {
   const [balanceModal, setBalanceModal] = useState(null); // { card, newBalance }
   // 修改样式弹窗
   const [styleModal, setStyleModal] = useState(null); // { card, newFace }
+  // 储蓄设置
+  const [savingsSettings, setSavingsSettings] = useState([]);
+  const [showSavingsSettings, setShowSavingsSettings] = useState(false);
+  const [editingSavings, setEditingSavings] = useState(null); // { userId, interestRate, penaltyRate }
   
   // 从 URL 获取用户 ID 筛选参数
   const urlParams = new URLSearchParams(window.location.search);
@@ -229,6 +235,10 @@ const AdminPanel = () => {
       // 获取用户列表
       const usersData = await authedFetch('/api/admin/users');
       setUsers(usersData.users || []);
+      
+      // 获取储蓄设置
+      const savingsData = await authedFetch('/api/admin/savings-settings');
+      setSavingsSettings(savingsData.settings || []);
     } catch (err) {
       setError(err.message || '加载数据失败');
     } finally {
@@ -381,6 +391,40 @@ const AdminPanel = () => {
       reloadData();
     } catch (err) {
       setError(err.message || '删除失败');
+    }
+  };
+
+  // 更新储蓄设置
+  const handleUpdateSavingsSettings = async () => {
+    if (!editingSavings) return;
+    setError('');
+    setMessage('');
+    try {
+      await authedFetch(`/api/admin/savings-settings/${editingSavings.userId}`, {
+        method: 'PUT',
+        body: {
+          interestRate: Number(editingSavings.interestRate) / 100,
+          penaltyRate: Number(editingSavings.penaltyRate) / 100,
+        },
+      });
+      setMessage('储蓄设置已更新');
+      setEditingSavings(null);
+      reloadData();
+    } catch (err) {
+      setError(err.message || '更新失败');
+    }
+  };
+
+  // 手动触发利息计算
+  const handleProcessInterest = async () => {
+    setError('');
+    setMessage('');
+    try {
+      await authedFetch('/api/admin/process-interest', { method: 'POST' });
+      setMessage('利息计算完成');
+      reloadData();
+    } catch (err) {
+      setError(err.message || '利息计算失败');
     }
   };
 
@@ -709,6 +753,58 @@ const AdminPanel = () => {
             </div>
           </div>
         )}
+
+        {/* 储蓄设置面板 */}
+        {!userIdFilter && (
+          <div className="mt-6 bg-white rounded-2xl border border-slate-100 overflow-hidden">
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+              <h2 className="font-bold text-slate-800 flex items-center gap-2">
+                <PiggyBank size={18} className="text-amber-500" />
+                储蓄利率设置
+              </h2>
+              <button
+                onClick={handleProcessInterest}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 text-white text-sm font-medium rounded-lg hover:bg-amber-600 transition-colors"
+              >
+                <Zap size={14} />
+                计算利息
+              </button>
+            </div>
+            <div className="p-4">
+              <p className="text-sm text-slate-500 mb-4">设置每个用户的储蓄年利率和提前取出违约金比例。利息每月自动发放到用户卡片。</p>
+              <div className="space-y-3">
+                {savingsSettings.map((setting) => (
+                  <div key={setting.userId} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center text-amber-600 font-bold text-sm">
+                        {setting.userName?.charAt(0) || '?'}
+                      </div>
+                      <div>
+                        <p className="font-medium text-slate-800">{setting.userName}</p>
+                        <p className="text-xs text-slate-400">年利率 {(setting.interestRate * 100).toFixed(1)}% · 违约金 {(setting.penaltyRate * 100).toFixed(1)}%</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setEditingSavings({
+                        userId: setting.userId,
+                        userName: setting.userName,
+                        interestRate: (setting.interestRate * 100).toFixed(1),
+                        penaltyRate: (setting.penaltyRate * 100).toFixed(1),
+                      })}
+                      className="px-3 py-1.5 text-sm bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-100 transition-colors flex items-center gap-1.5"
+                    >
+                      <Edit size={14} />
+                      修改
+                    </button>
+                  </div>
+                ))}
+                {!savingsSettings.length && (
+                  <p className="text-center text-slate-400 py-4">暂无用户储蓄设置</p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 创建卡片弹窗 */}
@@ -876,7 +972,7 @@ const AdminPanel = () => {
       {/* 设置余额弹窗 */}
       {balanceModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-bold text-slate-800">设置余额</h3>
               <button onClick={() => setBalanceModal(null)} className="text-slate-400 hover:text-slate-600">
@@ -937,7 +1033,7 @@ const AdminPanel = () => {
       {/* 修改样式弹窗 */}
       {styleModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-bold text-slate-800">修改卡面样式</h3>
               <button onClick={() => setStyleModal(null)} className="text-slate-400 hover:text-slate-600">
@@ -1035,6 +1131,76 @@ const AdminPanel = () => {
           </div>
         </div>
       )}
+
+      {/* 储蓄设置编辑弹窗 */}
+      {editingSavings && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-lg font-bold text-slate-800">修改储蓄设置</h3>
+              <button onClick={() => setEditingSavings(null)} className="text-slate-400 hover:text-slate-600">
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="mb-6 p-4 bg-amber-50 rounded-xl">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center text-amber-600 font-bold">
+                  {editingSavings.userName?.charAt(0) || '?'}
+                </div>
+                <div>
+                  <p className="font-semibold text-slate-800">{editingSavings.userName}</p>
+                  <p className="text-xs text-amber-700">用户储蓄利率与违约金设置</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">年利率 (%)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="100"
+                  value={editingSavings.interestRate}
+                  onChange={(e) => setEditingSavings({ ...editingSavings, interestRate: e.target.value })}
+                  className="w-full border border-slate-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500 text-lg"
+                />
+                <p className="text-xs text-slate-400 mt-1">每月按年利率的1/12计算并发放利息</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">违约金比例 (%)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="100"
+                  value={editingSavings.penaltyRate}
+                  onChange={(e) => setEditingSavings({ ...editingSavings, penaltyRate: e.target.value })}
+                  className="w-full border border-slate-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500 text-lg"
+                />
+                <p className="text-xs text-slate-400 mt-1">储蓄未到期提前取出时扣除的本金比例</p>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingSavings(null)}
+                  className="flex-1 px-4 py-2.5 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleUpdateSavingsSettings}
+                  className="flex-1 px-4 py-2.5 bg-amber-500 text-white rounded-xl hover:bg-amber-600 transition-colors font-medium"
+                >
+                  保存设置
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1044,13 +1210,23 @@ const WalletScreen = ({ deepLink }) => {
   const [selectedCardId, setSelectedCardId] = useState(null);
   const [showInputModal, setShowInputModal] = useState(null);
   const [showStylePicker, setShowStylePicker] = useState(false);
-  const [currentWalletStyleIndex, setCurrentWalletStyleIndex] = useState(0);
+  const [currentWalletStyleIndex, setCurrentWalletStyleIndex] = useState(() => {
+    // 从 localStorage 读取保存的样式索引
+    const saved = localStorage.getItem('walletStyleIndex');
+    return saved ? parseInt(saved, 10) : 0;
+  });
   const [cards, setCards] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [amountInput, setAmountInput] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('');
   const [walletStyles, setWalletStyles] = useState([defaultWalletStyle]);
+  const [windowWidth, setWindowWidth] = useState(typeof window !== 'undefined' ? window.innerWidth : 360);
+  // 储蓄相关状态
+  const [showSavingsModal, setShowSavingsModal] = useState(false);
+  const [savingsAmount, setSavingsAmount] = useState('');
+  const [savingsMonths, setSavingsMonths] = useState('12');
+  const [showSavingsList, setShowSavingsList] = useState(false);
 
   const currentWalletStyle = walletStyles[currentWalletStyleIndex] || defaultWalletStyle;
 
@@ -1072,7 +1248,21 @@ const WalletScreen = ({ deepLink }) => {
     loadWalletStyles();
   }, []);
 
+  useEffect(() => {
+    const handleResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const { cardWidth, cardHeight } = useMemo(() => {
+    const width = Math.min(340, Math.max(260, windowWidth - 48));
+    const height = Math.round(width * 0.58);
+    return { cardWidth: width, cardHeight: height };
+  }, [windowWidth]);
+
   const handleSelectWalletStyle = (index) => {
+    // 保存样式选择到 localStorage
+    localStorage.setItem('walletStyleIndex', index.toString());
     if (viewState !== 'folded') {
       setViewState('folded');
       setTimeout(() => {
@@ -1085,10 +1275,19 @@ const WalletScreen = ({ deepLink }) => {
     }
   };
 
+  // 判断是否为根域名访问（没有任何卡片标识）
+  const isRootAccess = !deepLink.userSlug && !deepLink.publicId && !deepLink.token;
+
   const loadCards = async () => {
     setLoading(true);
     setError('');
     try {
+      if (isRootAccess) {
+        // 根域名访问：不加载任何卡片，显示NFC提示
+        setCards([]);
+        setLoading(false);
+        return;
+      }
       if (deepLink.userSlug) {
         // 用户级别链接：加载该用户的所有卡片
         const data = await fetchJson(`/api/public/users/${deepLink.userSlug}/cards`);
@@ -1107,11 +1306,6 @@ const WalletScreen = ({ deepLink }) => {
         setCards([normalized]);
         setSelectedCardId(normalized.id);
         setViewState('detail');
-      } else {
-        const data = await fetchJson('/api/public/cards');
-        const normalized = (data.cards || []).map((c, idx) => normalizeCard(c, idx));
-        setCards(normalized);
-        if (normalized.length && !selectedCardId) setSelectedCardId(normalized[0].id);
       }
     } catch (err) {
       setError(err.message || '数据加载失败');
@@ -1137,31 +1331,33 @@ const WalletScreen = ({ deepLink }) => {
       transition: 'all 0.7s cubic-bezier(0.34, 1.56, 0.64, 1)',
       position: 'absolute',
       left: '50%',
-      marginLeft: '-165px',
-      width: '330px',
-      height: '192px',
+      marginLeft: `${-cardWidth / 2}px`,
+      width: `${cardWidth}px`,
+      height: `${cardHeight}px`,
     };
 
     if (viewState === 'folded') {
-      const rotateAngle = (index - 1) * 6;
-      const xOffset = (index - 1) * 20;
-      const yOffset = Math.abs(index - 1) * 8;
-      const baseBottom = 180;
-      const stackOffset = (cards.length - 1 - index) * 35;
+      const stackIndex = index - 1;
+      const rotateAngle = stackIndex * 6;
+      const xOffset = stackIndex * 16;
+      const baseBottomPercent = 26;
+      const layerGapPercent = 4;
       return {
         ...baseStyle,
-        bottom: `${baseBottom + stackOffset - yOffset}px`,
-        transform: `translateX(${xOffset}px) rotate(${rotateAngle}deg) scale(${0.95})`,
+        bottom: `${baseBottomPercent + (cards.length - 1 - index) * layerGapPercent}%`,
+        transform: `translateX(${xOffset}px) rotate(${rotateAngle}deg) scale(${0.93})`,
         zIndex: 10 + index,
         filter: 'brightness(0.98)',
         transformOrigin: 'bottom center',
       };
     }
     if (viewState === 'expanded') {
+      const topOffset = Math.max(100, Math.min(140, cardHeight * 0.7));
+      const cardGap = Math.max(120, Math.min(165, Math.round(cardHeight * 0.9)));
       return {
         ...baseStyle,
         bottom: 'auto',
-        top: `${140 + index * 150}px`,
+        top: `${topOffset + index * cardGap}px`,
         transform: 'scale(1) rotate(0deg)',
         zIndex: 10 + index,
         filter: 'brightness(1)',
@@ -1173,7 +1369,7 @@ const WalletScreen = ({ deepLink }) => {
       return {
         ...baseStyle,
         bottom: 'auto',
-        top: '110px',
+        top: `${Math.max(90, Math.min(130, Math.round(cardHeight * 0.6)))}px`,
         transform: 'scale(1) rotate(0deg)',
         zIndex: 50,
         filter: 'brightness(1)',
@@ -1235,6 +1431,45 @@ const WalletScreen = ({ deepLink }) => {
     }
   };
 
+  // 创建储蓄
+  const submitSavings = async () => {
+    if (!selectedCard) return;
+    const amountCents = Math.round(Number(savingsAmount || 0) * 100);
+    if (!amountCents) {
+      setError('请输入储蓄金额');
+      return;
+    }
+    try {
+      const result = await fetchJson(`/api/public/cards/${selectedCard.publicId}/savings`, {
+        method: 'POST',
+        body: { amountCents, maturityMonths: Number(savingsMonths) || 12 },
+      });
+      setSavingsAmount('');
+      setSavingsMonths('12');
+      setShowSavingsModal(false);
+      setError(''); // 清除错误
+      alert(result.message || '储蓄成功');
+      loadCards();
+    } catch (err) {
+      setError(err.message || '储蓄失败');
+    }
+  };
+
+  // 提前取出储蓄
+  const withdrawSavings = async (savingsId) => {
+    if (!selectedCard) return;
+    if (!confirm('确定要提前取出这笔储蓄吗？未到期将扣除违约金。')) return;
+    try {
+      const result = await fetchJson(`/api/public/cards/${selectedCard.publicId}/savings/${savingsId}/withdraw`, {
+        method: 'POST',
+      });
+      alert(result.message || '取出成功');
+      loadCards();
+    } catch (err) {
+      setError(err.message || '取出失败');
+    }
+  };
+
   const handleWalletClick = () => {
     if (viewState === 'folded') {
       setViewState('expanded');
@@ -1244,10 +1479,9 @@ const WalletScreen = ({ deepLink }) => {
   };
 
   return (
-    <div className="min-h-screen bg-[#F4F1EA] font-sans text-slate-600 flex items-center justify-center overflow-hidden relative select-none">
-      <div className="absolute inset-0 opacity-40 pointer-events-none" style={{ backgroundImage: 'radial-gradient(#C8BFA9 1.5px, transparent 1.5px)', backgroundSize: '24px 24px' }}></div>
-      <div className="w-full max-w-md h-screen md:h-[850px] md:rounded-[3.5rem] bg-[#FAF9F6] relative shadow-[0_0_60px_-15px_rgba(0,0,0,0.2)] overflow-hidden flex flex-col ring-8 ring-white/50">
-        <div className="h-24 px-8 flex items-center justify-between z-40 pt-6 transition-all duration-300">
+    <div className="min-h-screen min-h-[100dvh] bg-[#F4F1EA] font-sans text-slate-600 flex items-center justify-center overflow-hidden relative select-none px-3">
+      <div className="w-full max-w-[430px] h-[95vh] max-h-[920px] md:h-[850px] md:max-h-[900px] md:rounded-[3.5rem] bg-[#FAF9F6] relative shadow-[0_0_60px_-15px_rgba(0,0,0,0.2)] overflow-hidden flex flex-col ring-8 ring-white/50">
+        <div className="h-20 sm:h-24 px-4 sm:px-8 flex items-center justify-between z-40 pt-4 sm:pt-6 transition-all duration-300">
           {viewState !== 'folded' ? (
             <button onClick={handleBack} className="w-10 h-10 bg-white rounded-full shadow-sm flex items-center justify-center hover:bg-slate-50 transition-all active:scale-95 text-slate-600">
               <ArrowLeft size={20} />
@@ -1266,15 +1500,24 @@ const WalletScreen = ({ deepLink }) => {
           </button>
         </div>
 
-        <div className="flex-1 relative w-full" onClick={viewState === 'expanded' ? handleBack : undefined}>
+        <div className="flex-1 relative w-full overflow-hidden" onClick={viewState === 'expanded' ? handleBack : undefined}>
           <div className={`absolute top-[8%] left-0 right-0 text-center transition-all duration-700 flex flex-col items-center justify-center ${viewState === 'folded' ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-10 pointer-events-none'}`}>
             <div className="mb-6 p-4 bg-[#F5F0E6] rounded-full shadow-inner transform scale-110 border border-white">
               <Sparkles size={28} className="text-[#C9A885]" />
             </div>
             <div className="flex flex-col items-center gap-3">
               <div className="h-[1px] w-16 bg-[#C9A885]/40"></div>
-              <p className="text-[#8B6B4F] text-lg font-medium italic font-serif tracking-wider">"积少成多，汇聚爱意"</p>
-              <p className="text-[#C8BFA9] text-xs font-medium uppercase tracking-[0.3em] mt-1">Where love resides</p>
+              {isRootAccess ? (
+                <>
+                  <p className="text-[#8B6B4F] text-lg font-medium italic font-serif tracking-wider">"请使用 NFC 碰触你的卡片"</p>
+                  <p className="text-[#C8BFA9] text-xs font-medium uppercase tracking-[0.3em] mt-1">Tap your card with NFC</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-[#8B6B4F] text-lg font-medium italic font-serif tracking-wider">"积少成多，汇聚爱意"</p>
+                  <p className="text-[#C8BFA9] text-xs font-medium uppercase tracking-[0.3em] mt-1">Where love resides</p>
+                </>
+              )}
               <div className="h-[1px] w-16 bg-[#C9A885]/40"></div>
             </div>
             <div className="mt-12 animate-bounce opacity-50">
@@ -1289,24 +1532,26 @@ const WalletScreen = ({ deepLink }) => {
               <div className={`absolute inset-0 ${card.color}`} style={card.faceUrl ? { backgroundImage: `url(${card.faceUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' } : undefined}></div>
               <div className="absolute inset-0 opacity-30 mix-blend-overlay" style={{ filter: 'contrast(120%) brightness(100%)', backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")` }}></div>
               <div className="absolute inset-0 bg-gradient-to-br from-white/40 to-transparent pointer-events-none"></div>
-              <div className={`relative z-10 h-full flex flex-col justify-between ${card.textColor}`}>
-                <div className="flex justify-end items-start">
-                </div>
-                <div className="space-y-1">
-                  <p className="text-xl font-bold opacity-80 tracking-wide mt-2">{card.ownerName}</p>
-                  <div className="flex items-baseline gap-1 mt-1">
-                    <span className="text-lg font-bold opacity-80">¥</span>
-                    <span className="text-4xl font-bold tracking-tighter">{card.balance}</span>
+              {viewState !== 'folded' && (
+                <div className={`relative z-10 h-full flex flex-col justify-between ${card.textColor} transition-opacity duration-300 ${viewState === 'expanded' ? 'opacity-95' : 'opacity-100'}`}>
+                  <div className="flex justify-end items-start">
                   </div>
-                  <div className="flex justify-between items-end mt-2">
-                    <span className="text-sm font-medium opacity-70 invisible">Hidden</span>
-                    <div className="flex gap-1.5">
-                      <div className="w-1.5 h-1.5 rounded-full bg-current opacity-40"></div>
-                      <div className="w-1.5 h-1.5 rounded-full bg-current opacity-80"></div>
+                  <div className="space-y-1">
+                    <p className="text-xl font-bold opacity-80 tracking-wide mt-2">{card.ownerName}</p>
+                    <div className="flex items-baseline gap-1 mt-1">
+                      <span className="text-lg font-bold opacity-80">¥</span>
+                      <span className="text-4xl font-bold tracking-tighter">{card.balance}</span>
+                    </div>
+                    <div className="flex justify-between items-end mt-2">
+                      <span className="text-sm font-medium opacity-70 invisible">Hidden</span>
+                      <div className="flex gap-1.5">
+                        <div className="w-1.5 h-1.5 rounded-full bg-current opacity-40"></div>
+                        <div className="w-1.5 h-1.5 rounded-full bg-current opacity-80"></div>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
+              )}
             </div>
           ))}
 
@@ -1338,7 +1583,7 @@ const WalletScreen = ({ deepLink }) => {
             <div className="absolute top-0 left-0 right-0 h-16 bg-gradient-to-b from-black/20 to-transparent rounded-t-[2.5rem] pointer-events-none mix-blend-multiply"></div>
             <div className={`absolute bottom-8 left-1/2 -translate-x-1/2 transition-opacity duration-500 flex flex-col items-center ${viewState === 'folded' ? 'opacity-90' : 'opacity-0'}`}>
               <span className={`font-bold text-[10px] tracking-[0.3em] uppercase font-serif`} style={{ color: currentWalletStyle.textMainColor, textShadow: `0 1px 1px rgba(255,255,255,0.3), 0 -1px 1px ${currentWalletStyle.textShadowColor}` }}>
-                Family Wallet
+                {isRootAccess ? '请使用 NFC 碰触卡片' : 'Family Wallet'}
               </span>
               <div className={`w-1 h-1 bg-[${currentWalletStyle.textMainColor}] rounded-full mt-2 opacity-60 shadow-[0_1px_1px_rgba(255,255,255,0.4)]`} style={{ backgroundColor: currentWalletStyle.textMainColor }}></div>
             </div>
@@ -1347,18 +1592,72 @@ const WalletScreen = ({ deepLink }) => {
 
           <div className={`absolute inset-x-0 bottom-0 bg-${currentWalletStyle.detailBgColor} rounded-t-[3rem] transition-all duration-500 shadow-[0_-20px_60px_rgba(0,0,0,0.1)] flex flex-col ${viewState === 'detail' ? 'h-[65%]' : 'h-0 opacity-0 pointer-events-none'}`} style={{ zIndex: 60 }}>
             <div className="w-12 h-1.5 bg-slate-200 rounded-full mx-auto mt-4 mb-2"></div>
-            <div className="px-8 pt-6 pb-6 grid grid-cols-2 gap-4 shrink-0">
-              <button onClick={() => setShowInputModal('expense')} className="h-20 bg-orange-50/80 rounded-[1.5rem] border border-orange-100 flex items-center justify-center gap-3 text-orange-700 font-bold hover:bg-orange-100 active:scale-95 transition-all shadow-sm hover:shadow-orange-100 group">
-                <div className="w-9 h-9 rounded-full bg-white flex items-center justify-center shadow-sm group-hover:scale-110 transition-transform">
-                  <Minus size={18} className="text-orange-500" />
-                </div>
-                <span>记支出</span>
+            
+            {/* 储蓄信息展示 */}
+            {selectedCard?.activeSavings?.length > 0 && (
+              <div className="px-8 pb-2">
+                <button 
+                  onClick={() => setShowSavingsList(!showSavingsList)}
+                  className="w-full p-3 bg-amber-50 rounded-2xl border border-amber-100 flex items-center justify-between"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center">
+                      <PiggyBank size={16} className="text-amber-600" />
+                    </div>
+                    <div className="text-left">
+                      <p className="text-sm font-bold text-amber-800">储蓄中</p>
+                      <p className="text-xs text-amber-600">
+                        {selectedCard.activeSavings.length} 笔 · 共 ¥{(selectedCard.totalSavingsCents / 100).toFixed(2)}
+                      </p>
+                    </div>
+                  </div>
+                  <ArrowLeft size={16} className={`text-amber-500 transition-transform ${showSavingsList ? 'rotate-90' : '-rotate-90'}`} />
+                </button>
+                
+                {showSavingsList && (
+                  <div className="mt-2 space-y-2">
+                    {selectedCard.activeSavings.map((s) => {
+                      const startDate = new Date(s.start_date);
+                      const maturityDate = new Date(startDate);
+                      maturityDate.setMonth(maturityDate.getMonth() + s.maturity_months);
+                      const daysLeft = Math.max(0, Math.ceil((maturityDate - new Date()) / (1000 * 60 * 60 * 24)));
+                      return (
+                        <div key={s.id} className="p-3 bg-white rounded-xl border border-amber-100 flex items-center justify-between">
+                          <div>
+                            <p className="text-sm font-bold text-slate-700">¥{(s.amount_cents / 100).toFixed(2)}</p>
+                            <p className="text-xs text-slate-400">
+                              利率 {(s.interest_rate * 100).toFixed(1)}% · 还剩 {daysLeft} 天
+                            </p>
+                            <p className="text-xs text-emerald-600">
+                              已获利息 ¥{(s.total_interest_cents / 100).toFixed(2)}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => withdrawSavings(s.id)}
+                            className="px-3 py-1.5 text-xs bg-rose-50 text-rose-600 rounded-lg hover:bg-rose-100 transition-colors"
+                          >
+                            取出
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+            
+            <div className="px-8 pt-4 pb-4 grid grid-cols-3 gap-3 shrink-0">
+              <button onClick={() => setShowInputModal('expense')} className="h-16 bg-orange-50/80 rounded-[1.25rem] border border-orange-100 flex flex-col items-center justify-center gap-1 text-orange-700 font-bold hover:bg-orange-100 active:scale-95 transition-all shadow-sm group">
+                <Minus size={18} className="text-orange-500" />
+                <span className="text-xs">支出</span>
               </button>
-              <button onClick={() => setShowInputModal('income')} className="h-20 bg-emerald-50/80 rounded-[1.5rem] border border-emerald-100 flex items-center justify-center gap-3 text-emerald-700 font-bold hover:bg-emerald-100 active:scale-95 transition-all shadow-sm hover:shadow-emerald-100 group">
-                <div className="w-9 h-9 rounded-full bg-white flex items-center justify-center shadow-sm group-hover:scale-110 transition-transform">
-                  <Plus size={18} className="text-emerald-500" />
-                </div>
-                <span>存一笔</span>
+              <button onClick={() => setShowInputModal('income')} className="h-16 bg-emerald-50/80 rounded-[1.25rem] border border-emerald-100 flex flex-col items-center justify-center gap-1 text-emerald-700 font-bold hover:bg-emerald-100 active:scale-95 transition-all shadow-sm group">
+                <Plus size={18} className="text-emerald-500" />
+                <span className="text-xs">收入</span>
+              </button>
+              <button onClick={() => setShowSavingsModal(true)} className="h-16 bg-amber-50/80 rounded-[1.25rem] border border-amber-100 flex flex-col items-center justify-center gap-1 text-amber-700 font-bold hover:bg-amber-100 active:scale-95 transition-all shadow-sm group">
+                <PiggyBank size={18} className="text-amber-500" />
+                <span className="text-xs">储蓄</span>
               </button>
             </div>
 
@@ -1370,16 +1669,16 @@ const WalletScreen = ({ deepLink }) => {
                 {(selectedCard?.transactions || []).map((t) => (
                   <div key={t.id} className="group flex items-center justify-between p-4 rounded-2xl hover:bg-slate-50 transition-colors cursor-default border border-transparent hover:border-slate-100">
                     <div className="flex items-center gap-4">
-                      <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${t.type === 'expense' ? 'bg-orange-100 text-orange-600 group-hover:scale-110 group-hover:rotate-3' : 'bg-emerald-100 text-emerald-600 group-hover:scale-110 group-hover:-rotate-3'}`}>
-                        {t.type === 'expense' ? <ShoppingBag size={16} /> : <WalletIcon size={16} />}
+                      <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${t.type === 'expense' || t.type === 'savings_deposit' || t.type === 'savings_penalty' ? 'bg-orange-100 text-orange-600 group-hover:scale-110 group-hover:rotate-3' : 'bg-emerald-100 text-emerald-600 group-hover:scale-110 group-hover:-rotate-3'}`}>
+                        {t.type === 'expense' ? <ShoppingBag size={16} /> : t.type === 'savings_deposit' ? <PiggyBank size={16} /> : <WalletIcon size={16} />}
                       </div>
                       <div>
                         <p className="font-bold text-slate-700 text-base">{t.title}</p>
                         <p className="text-xs text-slate-400 mt-0.5 font-medium">{new Date(t.date).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</p>
                       </div>
                     </div>
-                    <span className={`font-bold text-lg ${t.type === 'expense' ? 'text-slate-800' : 'text-emerald-600'}`}>
-                      {t.type === 'expense' ? '-' : '+'}{t.amount.toFixed(2)}
+                    <span className={`font-bold text-lg ${t.type === 'expense' || t.type === 'savings_deposit' || t.type === 'savings_penalty' ? 'text-slate-800' : 'text-emerald-600'}`}>
+                      {t.amount < 0 ? '' : '+'}{t.amount.toFixed(2)}
                     </span>
                   </div>
                 ))}
@@ -1438,6 +1737,77 @@ const WalletScreen = ({ deepLink }) => {
               </div>
               <button onClick={submitTransaction} className={`w-full h-16 rounded-2xl font-bold text-white text-xl shadow-xl active:scale-95 transition-transform flex items-center justify-center gap-2 ${showInputModal === 'expense' ? 'bg-gradient-to-r from-orange-400 to-rose-400 shadow-orange-200' : 'bg-gradient-to-r from-emerald-400 to-teal-400 shadow-emerald-200'}`}>
                 <span>确认{showInputModal === 'expense' ? '支出' : '存入'}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* 储蓄弹窗 */}
+        {showSavingsModal && (
+          <div className="fixed inset-0 z-[100] bg-slate-900/30 backdrop-blur-sm flex items-end sm:items-center justify-center">
+            <div className="bg-white w-full max-w-sm rounded-t-[2.5rem] sm:rounded-[2.5rem] p-8 animate-in slide-in-from-bottom-20 duration-300 shadow-2xl ring-1 ring-black/5">
+              <div className="flex justify-between items-center mb-6">
+                <div>
+                  <h3 className="font-bold text-2xl text-slate-800">定期储蓄</h3>
+                  <p className="text-slate-400 text-sm mt-1">存入资金获取利息收益</p>
+                </div>
+                <button onClick={() => setShowSavingsModal(false)} className="w-10 h-10 bg-slate-50 rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600 flex items-center justify-center transition-colors">
+                  <X size={22} />
+                </button>
+              </div>
+              
+              <div className="mb-6 p-4 bg-amber-50 rounded-2xl border border-amber-100">
+                <div className="flex items-center gap-3 mb-2">
+                  <PiggyBank size={20} className="text-amber-600" />
+                  <span className="text-sm font-bold text-amber-800">储蓄规则</span>
+                </div>
+                <ul className="text-xs text-amber-700 space-y-1">
+                  <li>• 利息每月自动发放到账户</li>
+                  <li>• 提前取出将扣除违约金</li>
+                  <li>• 到期后自动返还本金</li>
+                </ul>
+              </div>
+              
+              <div className="space-y-4 mb-6">
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 mb-2 uppercase">储蓄金额</label>
+                  <div className="relative bg-slate-50 rounded-2xl p-4 ring-1 ring-slate-100 focus-within:ring-2 focus-within:ring-amber-200 transition-all">
+                    <div className="flex items-center">
+                      <span className="text-2xl font-bold text-slate-800 mr-2">¥</span>
+                      <input 
+                        type="number" 
+                        value={savingsAmount} 
+                        onChange={(e) => setSavingsAmount(e.target.value)} 
+                        className="w-full bg-transparent text-3xl font-bold text-slate-800 focus:outline-none placeholder:text-slate-200" 
+                        placeholder="0.00" 
+                        autoFocus 
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-2">可用余额: ¥{selectedCard?.balance || '0.00'}</p>
+                </div>
+                
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 mb-2 uppercase">储蓄期限</label>
+                  <div className="grid grid-cols-4 gap-2">
+                    {['3', '6', '12', '24'].map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setSavingsMonths(m)}
+                        className={`py-3 rounded-xl font-bold text-sm transition-all ${savingsMonths === m ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                      >
+                        {m}个月
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              
+              <button 
+                onClick={submitSavings} 
+                className="w-full h-16 rounded-2xl font-bold text-white text-xl shadow-xl active:scale-95 transition-transform bg-gradient-to-r from-amber-400 to-orange-400 shadow-amber-200"
+              >
+                确认储蓄
               </button>
             </div>
           </div>

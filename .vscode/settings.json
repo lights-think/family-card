@@ -1,0 +1,8 @@
+{
+  "github.copilot.chat.localeOverride": "zh-CN",
+  "github.copilot.chat.commitMessageGeneration.instructions": [
+    {
+      "text": "请始终使用简体中文撰写 Git 提交信息，并遵守 Conventional Commits 规范。"
+    }
+  ]
+}

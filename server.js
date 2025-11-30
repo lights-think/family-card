@@ -76,9 +76,44 @@ const initSchema = () => {
       created_at TEXT NOT NULL,
       FOREIGN KEY(card_id) REFERENCES cards(id)
     );
+    -- 用户储蓄设置表
+    CREATE TABLE IF NOT EXISTS user_savings_settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL UNIQUE,
+      interest_rate REAL NOT NULL DEFAULT 0.03,
+      penalty_rate REAL NOT NULL DEFAULT 0.05,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+    -- 储蓄记录表
+    CREATE TABLE IF NOT EXISTS savings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      card_id INTEGER NOT NULL,
+      amount_cents INTEGER NOT NULL,
+      interest_rate REAL NOT NULL,
+      penalty_rate REAL NOT NULL,
+      start_date TEXT NOT NULL,
+      maturity_months INTEGER NOT NULL DEFAULT 12,
+      status TEXT NOT NULL DEFAULT 'active',
+      ended_at TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(card_id) REFERENCES cards(id)
+    );
+    -- 利息发放记录表
+    CREATE TABLE IF NOT EXISTS interest_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      savings_id INTEGER NOT NULL,
+      amount_cents INTEGER NOT NULL,
+      payment_date TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(savings_id) REFERENCES savings(id)
+    );
     CREATE INDEX IF NOT EXISTS idx_transactions_card_id ON transactions(card_id);
     CREATE INDEX IF NOT EXISTS idx_cards_public_id ON cards(public_id);
     CREATE INDEX IF NOT EXISTS idx_users_slug ON users(slug);
+    CREATE INDEX IF NOT EXISTS idx_savings_card_id ON savings(card_id);
+    CREATE INDEX IF NOT EXISTS idx_savings_status ON savings(status);
+    CREATE INDEX IF NOT EXISTS idx_interest_payments_savings_id ON interest_payments(savings_id);
   `);
 };
 
@@ -137,6 +172,18 @@ const buildCardResponse = (cardRow) => {
     .prepare('SELECT id, type, amount_cents, category, note, created_at FROM transactions WHERE card_id = ? ORDER BY datetime(created_at) DESC LIMIT 30')
     .all(cardRow.id);
   const balanceCents = computeBalance(cardRow.id);
+  
+  // 获取活跃的储蓄
+  const activeSavings = db.prepare(`
+    SELECT s.*, 
+           (SELECT COALESCE(SUM(ip.amount_cents), 0) FROM interest_payments ip WHERE ip.savings_id = s.id) as total_interest_cents
+    FROM savings s 
+    WHERE s.card_id = ? AND s.status = 'active'
+    ORDER BY s.created_at DESC
+  `).all(cardRow.id);
+  
+  const totalSavingsCents = activeSavings.reduce((sum, s) => sum + s.amount_cents, 0);
+  
   return {
     id: cardRow.id,
     name: cardRow.name,
@@ -145,6 +192,8 @@ const buildCardResponse = (cardRow) => {
     faceUrl: cardRow.face ? `/assets/cards/${cardRow.face}` : null,
     owner,
     balanceCents,
+    totalSavingsCents,
+    activeSavings,
     createdAt: cardRow.created_at,
     updatedAt: cardRow.updated_at,
     transactions,
@@ -377,6 +426,236 @@ app.post('/api/public/cards/by-token/:token/transactions', (req, res) => {
   }
 });
 
+// =============== 储蓄功能 API ===============
+
+// 获取用户储蓄设置
+const getUserSavingsSettings = (userId) => {
+  let settings = db.prepare('SELECT * FROM user_savings_settings WHERE user_id = ?').get(userId);
+  if (!settings) {
+    // 返回默认设置
+    settings = { user_id: userId, interest_rate: 0.03, penalty_rate: 0.05 };
+  }
+  return settings;
+};
+
+// 管理员：获取所有用户的储蓄设置
+app.get('/api/admin/savings-settings', requireAdmin, (req, res) => {
+  const users = db.prepare('SELECT id, name, slug FROM users ORDER BY id').all();
+  const settingsMap = {};
+  const allSettings = db.prepare('SELECT * FROM user_savings_settings').all();
+  allSettings.forEach(s => { settingsMap[s.user_id] = s; });
+  
+  const result = users.map(u => ({
+    userId: u.id,
+    userName: u.name,
+    userSlug: u.slug,
+    interestRate: settingsMap[u.id]?.interest_rate ?? 0.03,
+    penaltyRate: settingsMap[u.id]?.penalty_rate ?? 0.05,
+  }));
+  res.json({ settings: result });
+});
+
+// 管理员：更新用户储蓄设置
+app.put('/api/admin/savings-settings/:userId', requireAdmin, (req, res) => {
+  const { userId } = req.params;
+  const { interestRate, penaltyRate } = req.body || {};
+  
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  
+  const ir = Math.max(0, Math.min(1, Number(interestRate) || 0.03));
+  const pr = Math.max(0, Math.min(1, Number(penaltyRate) || 0.05));
+  
+  const existing = db.prepare('SELECT * FROM user_savings_settings WHERE user_id = ?').get(userId);
+  if (existing) {
+    db.prepare('UPDATE user_savings_settings SET interest_rate = ?, penalty_rate = ?, updated_at = ? WHERE user_id = ?')
+      .run(ir, pr, nowIso(), userId);
+  } else {
+    db.prepare('INSERT INTO user_savings_settings (user_id, interest_rate, penalty_rate, updated_at) VALUES (?, ?, ?, ?)')
+      .run(userId, ir, pr, nowIso());
+  }
+  
+  res.json({ 
+    userId: Number(userId), 
+    interestRate: ir, 
+    penaltyRate: pr,
+    message: '储蓄设置已更新'
+  });
+});
+
+// 获取卡片的储蓄列表
+const getCardSavings = (cardId) => {
+  return db.prepare(`
+    SELECT s.*, 
+           (SELECT COALESCE(SUM(ip.amount_cents), 0) FROM interest_payments ip WHERE ip.savings_id = s.id) as total_interest_cents
+    FROM savings s 
+    WHERE s.card_id = ? 
+    ORDER BY s.created_at DESC
+  `).all(cardId);
+};
+
+// 公开：获取卡片的储蓄列表
+app.get('/api/public/cards/:publicId/savings', (req, res) => {
+  const { publicId } = req.params;
+  const card = getCardRowByPublicId(publicId);
+  if (!card) return res.status(404).json({ error: 'Card not found' });
+  
+  const savings = getCardSavings(card.id);
+  res.json({ savings });
+});
+
+// 公开：创建储蓄
+app.post('/api/public/cards/:publicId/savings', (req, res) => {
+  const { publicId } = req.params;
+  const { amountCents, maturityMonths = 12 } = req.body || {};
+  
+  const card = getCardRowByPublicId(publicId);
+  if (!card) return res.status(404).json({ error: 'Card not found' });
+  
+  const amount = Math.abs(Math.round(Number(amountCents) || 0));
+  if (amount <= 0) return res.status(400).json({ error: '储蓄金额必须大于0' });
+  const months = Math.max(1, Math.min(120, Math.round(Number(maturityMonths) || 12)));
+  
+  // 检查余额是否足够
+  const currentBalance = computeBalance(card.id);
+  if (currentBalance < amount) {
+    return res.status(400).json({ error: '余额不足' });
+  }
+  
+  // 获取用户的储蓄设置
+  const settings = getUserSavingsSettings(card.owner_id);
+  
+  // 从卡片扣除金额
+  db.prepare('INSERT INTO transactions (card_id, type, amount_cents, category, note, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(card.id, 'savings_deposit', -amount, '储蓄', '转入储蓄账户', nowIso());
+  
+  // 创建储蓄记录
+  const info = db.prepare(`
+    INSERT INTO savings (card_id, amount_cents, interest_rate, penalty_rate, start_date, maturity_months, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
+  `).run(card.id, amount, settings.interest_rate, settings.penalty_rate, nowIso(), months, nowIso());
+  
+  const savings = db.prepare('SELECT * FROM savings WHERE id = ?').get(info.lastInsertRowid);
+  res.json({ 
+    savings,
+    message: `已成功存入 ¥${(amount / 100).toFixed(2)}，年利率 ${(settings.interest_rate * 100).toFixed(1)}%`
+  });
+});
+
+// 公开：提前取出储蓄（需要扣违约金）
+app.post('/api/public/cards/:publicId/savings/:savingsId/withdraw', (req, res) => {
+  const { publicId, savingsId } = req.params;
+  
+  const card = getCardRowByPublicId(publicId);
+  if (!card) return res.status(404).json({ error: 'Card not found' });
+  
+  const savings = db.prepare('SELECT * FROM savings WHERE id = ? AND card_id = ?').get(savingsId, card.id);
+  if (!savings) return res.status(404).json({ error: 'Savings not found' });
+  if (savings.status !== 'active') return res.status(400).json({ error: '该储蓄已结束' });
+  
+  // 计算已获得的利息
+  const totalInterest = db.prepare('SELECT COALESCE(SUM(amount_cents), 0) as total FROM interest_payments WHERE savings_id = ?').get(savingsId).total;
+  
+  // 检查是否到期
+  const startDate = new Date(savings.start_date);
+  const maturityDate = new Date(startDate);
+  maturityDate.setMonth(maturityDate.getMonth() + savings.maturity_months);
+  const now = new Date();
+  const isMatured = now >= maturityDate;
+  
+  let returnAmount = savings.amount_cents;
+  let penaltyAmount = 0;
+  let note = '';
+  
+  if (!isMatured) {
+    // 提前取出，扣除违约金：通过独立交易扣减，归还全额本金
+    penaltyAmount = Math.round(savings.amount_cents * savings.penalty_rate);
+    returnAmount = savings.amount_cents;
+    note = `提前取出储蓄，扣除违约金 ¥${(penaltyAmount / 100).toFixed(2)}`;
+    
+    // 记录违约金扣除
+    db.prepare('INSERT INTO transactions (card_id, type, amount_cents, category, note, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(card.id, 'savings_penalty', -penaltyAmount, '储蓄', '储蓄违约金', nowIso());
+  } else {
+    note = '储蓄到期取出';
+  }
+  
+  // 归还本金（提前取出时已单独扣罚金，这里返还全额本金）
+  db.prepare('INSERT INTO transactions (card_id, type, amount_cents, category, note, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(card.id, 'savings_withdraw', returnAmount, '储蓄', note, nowIso());
+  
+  // 更新储蓄状态
+  db.prepare('UPDATE savings SET status = ?, ended_at = ? WHERE id = ?')
+    .run(isMatured ? 'matured' : 'withdrawn', nowIso(), savingsId);
+  
+  res.json({
+    returnAmount,
+    penaltyAmount,
+    totalInterest,
+    isMatured,
+    message: isMatured 
+      ? `储蓄到期，已取回本金 ¥${(returnAmount / 100).toFixed(2)}，累计利息 ¥${(totalInterest / 100).toFixed(2)}`
+      : `提前取出，扣除违约金 ¥${(penaltyAmount / 100).toFixed(2)}，实际取回 ¥${((returnAmount - penaltyAmount) / 100).toFixed(2)}`
+  });
+});
+
+// 计算并发放利息的函数（每月调用）
+const processMonthlyInterest = () => {
+  const activeSavings = db.prepare('SELECT * FROM savings WHERE status = ?').all('active');
+  const now = new Date();
+  
+  for (const savings of activeSavings) {
+    const startDate = new Date(savings.start_date);
+    // 计算从开始到现在经过了多少个完整月份
+    const monthsElapsed = (now.getFullYear() - startDate.getFullYear()) * 12 + (now.getMonth() - startDate.getMonth());
+    if (monthsElapsed <= 0) continue;
+
+    const card = getCardRowById(savings.card_id);
+    if (!card) continue;
+
+    // 已发放的利息次数
+    let paidCount = db.prepare('SELECT COUNT(*) as count FROM interest_payments WHERE savings_id = ?').get(savings.id).count;
+    // 不超过到期月份的可发放次数
+    const allowedMonths = Math.min(monthsElapsed, savings.maturity_months);
+    const missingMonths = allowedMonths - paidCount;
+
+    if (missingMonths > 0) {
+      const monthlyRate = savings.interest_rate / 12;
+      for (let i = 0; i < missingMonths; i++) {
+        const monthNumber = paidCount + i + 1;
+        const monthlyInterest = Math.round(savings.amount_cents * monthlyRate);
+
+        db.prepare('INSERT INTO transactions (card_id, type, amount_cents, category, note, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(card.id, 'income', monthlyInterest, '理财', `储蓄利息（第${monthNumber}个月）`, nowIso());
+
+        db.prepare('INSERT INTO interest_payments (savings_id, amount_cents, payment_date, created_at) VALUES (?, ?, ?, ?)')
+          .run(savings.id, monthlyInterest, nowIso(), nowIso());
+      }
+      paidCount += missingMonths;
+    }
+    
+    // 检查是否到期
+    const maturityDate = new Date(startDate);
+    maturityDate.setMonth(maturityDate.getMonth() + savings.maturity_months);
+    if (now >= maturityDate && savings.status === 'active') {
+      // 自动到期，归还本金
+      const card = getCardRowById(savings.card_id);
+      if (card) {
+        db.prepare('INSERT INTO transactions (card_id, type, amount_cents, category, note, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(card.id, 'savings_withdraw', savings.amount_cents, '储蓄', '储蓄到期自动取回', nowIso());
+        db.prepare('UPDATE savings SET status = ?, ended_at = ? WHERE id = ?')
+          .run('matured', nowIso(), savings.id);
+      }
+    }
+  }
+};
+
+// 管理员：手动触发利息计算
+app.post('/api/admin/process-interest', requireAdmin, (req, res) => {
+  processMonthlyInterest();
+  res.json({ message: '利息计算完成' });
+});
+
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: 'Server error' });
@@ -393,6 +672,12 @@ try {
   console.warn('Could not ensure face column', err.message);
 }
 seedData();
+
+// 启动时检查并处理利息（在数据库初始化之后）
+processMonthlyInterest();
+
+// 每小时检查一次利息（在生产环境中可以使用定时任务）
+setInterval(processMonthlyInterest, 60 * 60 * 1000);
 
 // Serve card face assets
 app.use('/assets/cards', express.static(designDir));
