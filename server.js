@@ -686,6 +686,12 @@ app.use('/assets/cards', express.static(designDir));
 const walletDesignDir = path.join(__dirname, 'Family Wallet Design');
 app.use('/assets/wallet-styles', express.static(walletDesignDir));
 
+// 生产环境：提供 dist 目录的静态文件
+const distDir = path.join(__dirname, 'dist');
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir));
+}
+
 // 获取卡面列表 API
 app.get('/api/public/card-faces', (req, res) => {
   try {
@@ -720,6 +726,13 @@ app.get('/api/public/wallet-styles', (req, res) => {
     res.status(500).json({ error: 'Failed to read wallet styles', styles: [] });
   }
 });
+
+// 生产环境：所有非 API 请求都返回 index.html（支持前端路由）
+if (fs.existsSync(distDir)) {
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(distDir, 'index.html'));
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`API server running on http://localhost:${PORT}`);
