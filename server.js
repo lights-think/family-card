@@ -7,6 +7,10 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { nanoid } from 'nanoid';
+import dotenv from 'dotenv';
+
+// 加载 .env 文件
+dotenv.config();
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET || 'family-wallet-admin-secret';
